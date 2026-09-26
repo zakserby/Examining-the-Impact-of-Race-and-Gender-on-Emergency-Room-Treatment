@@ -1,7 +1,4 @@
-hello
-  indented
-line3---
-title: "Examining the Impact of Race and Gender on Emergency Room Treatment"
+ment"
 subtitle: "STA 230 Final Project: analysis code"
 author: "Zachary Serby"
 output: html_document
