@@ -1,0 +1,423 @@
+hello
+  indented
+line3---
+title: "Examining the Impact of Race and Gender on Emergency Room Treatment"
+subtitle: "STA 230 Final Project: analysis code"
+author: "Zachary Serby"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Packages
+
+```{r packages}
+library(tidyverse)     # dplyr, ggplot2, stringr, tibble, etc.
+library(readxl)
+library(tidytext)
+library(broom)
+library(nnet)          # multinomial logistic regression
+library(rpart)         # decision trees
+library(rpart.plot)
+library(randomForest)
+library(pROC)          # ROC curves / AUC
+library(caret)
+```
+
+## Load and clean the NEISS data
+
+The yearly NEISS extracts (`NEISS_2013.XLSX` ... `NEISS_2022.XLSX`) go in `data/raw/`,
+and the NEISS format key (`NEISS_FMT.XLSX`) goes in `data/`. See `data/README.md`.
+
+```{r load-data}
+## List all yearly NEISS files
+file_list <- list.files(path = "../data/raw", pattern = "\\.XLSX$", full.names = TRUE)
+
+## Initialize an empty list to store data frames
+dataframe_list <- list()
+
+## Loop through each file and read data
+for (file_name in file_list) {
+  # Read data from Excel file
+  data <- read_excel(file_name)
+
+  ## Extract year from file name and convert to integer
+  Year <- as.integer(sub("^NEISS_(\\d{4})\\.XLSX", "\\1", basename(file_name)))
+
+  ## Add year column to the data
+  data$year <- Year
+
+  ## Append the data frame to the list
+  dataframe_list <- append(dataframe_list, list(data))
+}
+
+## Combine all data frames into a single data frame
+combine_data <- bind_rows(dataframe_list)
+
+## Drop unused columns (sample weights, PSU/stratum, mostly-NA fields) and
+## keep records with Sex = 1 (male) or 2 (female)
+cleaner_data <- combine_data[ -c(6, 7, 10:13, 15:21, 23:25) ] %>%
+    filter(!Sex %in% c(0, 3))
+
+cleaner_data$Disposition <- as.factor(cleaner_data$Disposition)
+cleaner_data$Race <- as.factor(cleaner_data$Race)
+cleaner_data$Sex <- as.factor(cleaner_data$Sex)
+
+## Change the reference level of the categorical variable to "1 = White"
+cleaner_data$Race <- relevel(cleaner_data$Race, ref = "1")
+```
+
+```{r load-key}
+## Read and tidy the NEISS format key
+key_file <- "../data/NEISS_FMT.XLSX"
+key_data <- read_excel(key_file)
+
+## Rename column names
+colnames(key_data) = c("format_name", "start_value", "end_value", "format_value")
+
+## Remove variables not used in this analysis
+new_key <- key_data %>%
+  filter(!format_name %in% c("PROD", "LOC", "HISP", "FIRE"))
+```
+
+## Tests of association
+
+Do all sexes and races have an equal chance of each treatment (disposition)?
+
+Null hypothesis: the probability of getting any treatment is the same regardless of sex.
+$H_0: P(\text{Treatment} \mid \text{Sex}) = P(\text{Treatment})$
+
+```{r chisq-sex}
+## Chi-squared test of association
+chisq.test(x = table(cleaner_data$Disposition, cleaner_data$Sex))
+```
+
+Null hypothesis: the probability of getting any treatment is the same regardless of race.
+$H_0: P(\text{Treatment} \mid \text{Race}) = P(\text{Treatment})$
+
+```{r fisher-race}
+## Fisher's Exact Test, looking at the variables Race and Disposition
+fisher.test(x = table(cleaner_data$Disposition, cleaner_data$Race), simulate.p.value = TRUE)
+```
+
+I obtained a p-value < 2.2e-16 for Sex and Disposition from a chi-squared test, and a
+p-value of 0.0004998 for Race and Disposition from Fisher's exact test (simulated p-value).
+
+Both p-values are much smaller than the common significance level of 0.05. Therefore, there is
+sufficient evidence to reject both null hypotheses that the probability of getting any
+disposition (treatment) is the same regardless of sex and of race. There is enough statistical
+evidence to further investigate the association between Race/Sex and treatment.
+
+## Comparing models: multinomial logistic regression, decision tree, random forest
+
+```{r fit-models}
+## Fit a multinomial logistic regression model
+mfit <- multinom(Disposition ~ Race + Sex, data = cleaner_data, trace = FALSE)
+
+## Fit a decision tree
+my_tree <- rpart(Disposition ~ Race + Sex, data = cleaner_data)
+
+## Fit a random forest
+rf <- randomForest(Disposition ~ Race + Sex, data = cleaner_data, ntree = 300)
+```
+
+```{r accuracy}
+## Function to calculate accuracy
+calculate_accuracy <- function(model, data) {
+  ## Get the predicted class probabilities
+  fitted_probs <- predict(model, newdata = data, type = "prob")
+
+  ## Find the index of the maximum probability for each observation
+  most_likely <- apply(fitted_probs, 1, which.max)
+
+  ## Map the indices to category labels
+  pred_cats <- levels(data$Disposition)[most_likely]
+
+  ## Calculate the fraction of correct predictions (accuracy)
+  accuracy <- sum(pred_cats == data$Disposition) / nrow(data)
+
+  return(accuracy)
+}
+
+## Calculate accuracy for each model
+accuracy_mfit <- calculate_accuracy(mfit, cleaner_data)
+accuracy_tree <- calculate_accuracy(my_tree, cleaner_data)
+accuracy_rf <- calculate_accuracy(rf, cleaner_data)
+
+## Print the accuracies
+cat("Multinomial Logistic Regression Accuracy:", accuracy_mfit, "\n")
+cat("Decision Tree Accuracy:", accuracy_tree, "\n")
+cat("Random Forest Accuracy:", accuracy_rf, "\n")
+```
+
+Multinomial logistic regression did not outperform the classification trees on accuracy: no
+splits occurred in the decision tree, and all three models have the same accuracy (0.9022879).
+
+Because the accuracies are identical, we compare the models using the AUC for each disposition.
+
+### ROC / AUC: multinomial logistic regression
+
+```{r roc-multinom}
+## Predicted probabilities for each class (each disposition)
+predicted_probs <- predict(mfit, newdata = cleaner_data, "probs")
+
+## Extract the true class labels
+true_labels <- cleaner_data$Disposition
+
+## One-vs-rest ROC curve for each class
+roc_multiclass <- lapply(1:nlevels(true_labels), function(i) {
+  roc(as.numeric(true_labels == levels(true_labels)[i]), predicted_probs[, i], quiet = TRUE)
+})
+
+## Plot the multiclass ROC curves
+colors <- c("red", "green", "blue", "purple", "yellow", "black")
+for (i in 1:length(roc_multiclass)) {
+  plot(roc_multiclass[[i]], col = colors[i], add = i > 1)
+}
+legend("bottomright", legend = levels(true_labels), fill = colors)
+
+## Calculate AUC for each class
+auc_values <- sapply(roc_multiclass, function(roc_class) {
+  auc(roc_class)
+})
+print(auc_values)
+```
+
+AUC values range from 0.544 for Disposition 1 (treated and released) to 0.699 for
+Disposition 8 (died in the ER), all above 0.5. An AUC of 1 indicates perfect classification,
+while an AUC of 0.5 is equivalent to random guessing.
+
+### ROC / AUC: decision tree
+
+```{r roc-tree}
+predicted_probs <- predict(my_tree, newdata = cleaner_data, "prob")
+true_labels <- cleaner_data$Disposition
+
+roc_multiclass <- lapply(1:nlevels(true_labels), function(i) {
+  roc(as.numeric(true_labels == levels(true_labels)[i]), predicted_probs[, i], quiet = TRUE)
+})
+
+for (i in 1:length(roc_multiclass)) {
+  plot(roc_multiclass[[i]], col = colors[i], add = i > 1)
+}
+legend("bottomright", legend = levels(true_labels), fill = colors)
+
+auc_values <- sapply(roc_multiclass, function(roc_class) {
+  auc(roc_class)
+})
+print(auc_values)
+```
+
+The decision tree has an AUC of 0.5 for every disposition, lower than the multinomial
+logistic regression model.
+
+### ROC / AUC: random forest
+
+```{r roc-rf}
+predicted_probs <- predict(rf, newdata = cleaner_data, "prob")
+true_labels <- cleaner_data$Disposition
+
+roc_multiclass <- lapply(1:nlevels(true_labels), function(i) {
+  roc(as.numeric(true_labels == levels(true_labels)[i]), predicted_probs[, i], quiet = TRUE)
+})
+
+for (i in 1:length(roc_multiclass)) {
+  plot(roc_multiclass[[i]], col = colors[i], add = i > 1)
+}
+legend("bottomright", legend = levels(true_labels), fill = colors)
+
+auc_values <- sapply(roc_multiclass, function(roc_class) {
+  auc(roc_class)
+})
+print(auc_values)
+```
+
+The random forest also has an AUC of 0.5 for every disposition, like the decision tree.
+We therefore use the multinomial logistic regression model as the one that best represents
+our data.
+
+## Multinomial logistic regression
+
+```{r multinom-summary}
+## Summary of the data
+summary(cleaner_data)
+
+## Fit a multinomial logistic regression model
+mfit <- multinom(Disposition ~ Race + Sex, data = cleaner_data, trace = FALSE)
+
+## Coefficients (log relative risk ratios vs. Disposition 1, White, Male)
+coef(mfit)
+
+## Exponentiated coefficients for Race + Sex (relative risk ratios)
+exp(coef(mfit)[, 2:8])
+```
+
+Note: the key lists 8 dispositions, but "no injury" (0) and "unknown" (9) have zero patients.
+
+There's a decrease in the likelihood of being treated and transferred (Disposition 2) for Black
+patients (Race 2) relative to White patients (Race 1, the reference level), and for women
+relative to men.
+
+```{r multinom-pvalues}
+## Convert model coefficients to a tidy data frame
+tidy_mfit <- tidy(mfit)
+
+## Coefficient p-values by disposition, colored by predictor
+ggplot(tidy_mfit, aes(x = p.value, y = factor(y.level), color = term)) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0.05, linetype = "dashed", color = "red") +
+  annotate("text", x = 0.06, y = Inf, vjust = 1.5, label = "p = 0.05", color = "red", size = 3, hjust = 0) +
+  labs(title = "Multinomial Logistic Regression Coefficients",
+       x = "p-value",
+       y = "Treatment",
+       color = "Predictor Variable") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+The purple marker at Disposition 8 is a p-value below 0.05, so we reject the null hypothesis that
+Native Hawaiian/Pacific Islander patients are as likely as White patients to die in the ER.
+This disparity warrants further investigation.
+
+## Decision tree
+
+```{r tree}
+## No adjustment of cp or minsplit changes this tree
+my_tree <- rpart(Disposition ~ Race + Sex, data = cleaner_data)
+prp(my_tree, extra = 104)
+```
+
+The single node predicts TREATED/EXAMINED AND RELEASED (Disposition 1). About 90% of patients
+were treated and released, 2% treated and transferred, 6% admitted, 1% held for observation,
+2% left without being seen, and ~0% died in the ER.
+
+## Random forest
+
+```{r rf}
+rf <- randomForest(Disposition ~ Race + Sex, data = cleaner_data, ntree = 300)
+rf$importance   # variable importance (mean decrease in Gini)
+plot(rf)
+```
+
+The error rate doesn't improve as trees are added because the forest always predicts the
+dominant category (Disposition 1, treated and released). Sex has a larger Gini importance
+than Race.
+
+## Additional analysis
+
+### Most common words in the injury narrative, by sex and race
+
+The wording in the `Narrative` field differs by race and sex. Terminology could be one factor
+behind disparities in dispositions.
+
+```{r words-sex}
+narrative_sex_data <- cleaner_data %>%
+  select(Narrative, Sex)
+
+## Split narrative into individual words
+words <- str_split(narrative_sex_data$Narrative, "\\s+")
+
+## Tidy format: one row per word, paired with narrative id and Sex
+tidy_form <- tibble(word = unlist(words),
+                    row = rep(1:length(words), lengths(words)),
+                    Sex = rep(narrative_sex_data$Sex, lengths(words)))
+
+## Keep words with four letters or more
+tidy_form_filtered <- tidy_form %>%
+  filter(str_length(word) >= 4)
+
+## Word frequencies by Sex
+freq_word <- tidy_form_filtered %>%
+  group_by(Sex, word) %>%
+  count(sort = TRUE)
+
+## Top 10 words for each Sex
+pop_words_sex <- freq_word %>%
+  group_by(Sex) %>%
+  slice_max(n = 10, order_by = n)
+
+print(pop_words_sex)
+```
+
+```{r words-race}
+narrative_race_data <- cleaner_data %>%
+  select(Narrative, Race)
+
+words <- str_split(narrative_race_data$Narrative, "\\s+")
+
+tidy_form <- tibble(word = unlist(words),
+                    row = rep(1:length(words), lengths(words)),
+                    Race = rep(narrative_race_data$Race, lengths(words)))
+
+tidy_form_filtered <- tidy_form %>%
+  filter(str_length(word) >= 4)
+
+freq_word <- tidy_form_filtered %>%
+  group_by(Race, word) %>%
+  count(sort = TRUE)
+
+pop_words_race <- freq_word %>%
+  group_by(Race) %>%
+  slice_max(n = 10, order_by = n)
+
+print(pop_words_race)
+```
+
+### Sex and race composition of each disposition
+
+```{r composition}
+segment_bar_data <- cleaner_data %>%
+  select(Disposition, Sex, Race) %>%
+  mutate(
+    Disposition = case_when(
+    Disposition == 1 ~ "TRE/REL",
+    Disposition == 2 ~ "TRE/TRANS",
+    Disposition == 4 ~ "TRE/HOSP",
+    Disposition == 5 ~ "HELD",
+    Disposition == 6 ~ "NOTSEEN",
+    Disposition == 8 ~ "DIED",
+    Disposition == 9 ~ "UNKNOWN"
+    ))
+
+## Segmented bar chart by sex
+ggplot(segment_bar_data, aes(x = Disposition, fill = Sex)) +
+  geom_bar(position = "fill") +
+  scale_fill_discrete(labels = c("Male", "Female"))
+
+## Segmented bar chart by race
+ggplot(segment_bar_data, aes(x = Disposition, fill = Race)) +
+  geom_bar(position = "fill") +
+  scale_fill_discrete(labels = c("N.S.", "WHITE", "BLACK", "OTHER", "ASIAN", "AMER.IND./ALS.NAT.", "PAC.ISL"))
+```
+
+### Multinomial logistic regression without Disposition 1
+
+Disposition 1 (treated and released) is the large majority, so we check whether Race and Sex
+remain significant without it.
+
+```{r without-treatment1}
+Removed_treatment1 <- cleaner_data %>%
+  filter(Disposition != 1)
+Removed_treatment1$Race <- relevel(Removed_treatment1$Race, ref = "1")
+
+mfit <- multinom(Disposition ~ Race + Sex, data = Removed_treatment1, trace = FALSE)
+tidy_mfit <- tidy(mfit)
+
+ggplot(tidy_mfit, aes(x = p.value, y = factor(y.level), color = term)) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0.05, linetype = "dashed", color = "red") +
+  annotate("text", x = 0.06, y = Inf, vjust = 1.5, label = "p = 0.05", color = "red", size = 3, hjust = 0) +
+  labs(title = "Multinomial Logistic Regression Coefficients (Disposition 1 removed)",
+       x = "p-value",
+       y = "Treatment",
+       color = "Predictor Variable") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+With Disposition 1 omitted, Race and Sex are less significant (including for female and Native
+Hawaiian/Pacific Islander patients). This suggests much of the overall race/sex disparity is
+driven by who is treated and released. The result may also reflect the change in race and sex
+proportions after removing those rows.
