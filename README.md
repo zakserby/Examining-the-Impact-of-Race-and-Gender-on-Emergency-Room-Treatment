@@ -1,4 +1,4 @@
-# Examining-the-Impact-of-Race-and-Gender-on-Emergency-Room-Treatment
+# Impact of Race and Gender on Emergency Room Treatment
 
 R code for our STA 230 final project (Zachary Serby and Irene Agusti, Fall 2023): "Unmasking Disparities: Examining the Impact of Race and Gender on Emergency Room Treatment for Young Adults."
 
@@ -6,7 +6,7 @@ We used ten years (2013-2022) of NEISS emergency room data on patients aged 16-2
 
 Report: [report/STA-230-final.pdf](report/STA-230-final.pdf)
 
-Knitted results with figures: [Stats-230-Final-Project-1.html](https://htmlpreview.github.io/?https://github.com/zakserby/Examining-the-Impact-of-Race-and-Gender-on-Emergency-Room-Treatment/blob/main/analysis/Stats-230-Final-Project-1.html)
+Knitted results with figures: [Stats-230-Final-Project-1.html](https://htmlpreview.github.io/?https://github.com/zakserby/Impact-of-Race-and-Gender-on-Emergency-Room-Treatment/blob/main/analysis/Stats-230-Final-Project-1.html)
 
 Data:
 
